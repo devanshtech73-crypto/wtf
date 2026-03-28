@@ -1,7 +1,7 @@
 import os
-from pymongo import MongoClient
-from datetime import datetime
 import json
+import requests
+from pymongo import MongoClient
 
 # 🔐 ENV
 MONGO_URI = os.getenv("MONGO_URI")
@@ -12,12 +12,31 @@ if not MONGO_URI:
 client = MongoClient(MONGO_URI)
 db = client["blazecloud_panel"]
 
-collections = ["users", "bots", "services"]
-
 SENSITIVE_FIELDS = {
-    "github_token", "password", "token",
+    "github_token", "token",
     "access_token", "refresh_token", "session"
 }
+
+# ---------------- GITHUB CHECK ----------------
+
+def check_github(token):
+    if not token:
+        return "❌ NOT CONNECTED"
+
+    try:
+        res = requests.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5
+        )
+        if res.status_code == 200:
+            return "✅ VALID"
+        else:
+            return "⚠️ INVALID"
+    except:
+        return "⚠️ ERROR"
+
+# ---------------- CLEAN ----------------
 
 def clean(doc):
     doc["_id"] = str(doc.get("_id"))
@@ -28,24 +47,41 @@ def clean(doc):
 
     return doc
 
-print("\n===== 🔥 DATABASE DUMP START =====\n")
+# ---------------- FETCH DATA ----------------
 
-for name in collections:
-    col = db[name]
-    print(f"\n📦 COLLECTION: {name.upper()}\n")
+data = {}
 
-    docs = list(col.find().limit(20))  # limit for safety
+# 🔥 USERS (latest first)
+users = list(db["users"].find().sort("_id", -1))
 
-    if not docs:
-        print("No data\n")
-        continue
+users_out = []
+for u in users:
+    raw_token = u.get("github_token")
+    gh_status = check_github(raw_token)
 
-    for d in docs:
-        print(json.dumps(clean(d), indent=2))
-        print("-" * 40)
+    u_clean = clean(dict(u))
+    u_clean["github_status"] = gh_status
 
-print("\n===== ✅ DATABASE DUMP END =====\n")
+    users_out.append(u_clean)
 
-# keep app alive (important for Railway)
+data["users"] = users_out
+
+# 🔥 BOTS (latest first)
+bots = list(db["bots"].find().sort("_id", -1))
+data["bots"] = [clean(dict(b)) for b in bots]
+
+# 🔥 SERVICES (latest first)
+services = list(db["services"].find().sort("_id", -1))
+data["services"] = [clean(dict(s)) for s in services]
+
+# ---------------- PRINT ALL AT ONCE ----------------
+
+print("\n===== 🔥 FULL DATABASE DUMP =====\n")
+
+print(json.dumps(data, indent=2))
+
+print("\n===== ✅ END =====\n")
+
+# keep alive for Railway logs
 while True:
     pass
