@@ -1,23 +1,37 @@
+from flask import jsonify
+from pymongo import MongoClient
 import os
-import discord
 
-TOKEN = os.getenv("D_TOKEN")
+@app.route("/db")
+def debug_db():
+    # 🔐 optional: protect with a secret key
+    if os.getenv("ADMIN_TOKEN") and \
+       (request.headers.get("x-admin-token") != os.getenv("ADMIN_TOKEN")):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 403
 
-intents = discord.Intents.default()
-intents.message_content = True
+    client = MongoClient(os.getenv("MONGO_URI"))
+    db = client["blazecloud_panel"]
 
-client = discord.Client(intents=intents)
+    collections = ["users", "bots", "services"]
 
-@client.event
-async def on_ready():
-    print(f"✅ Bot is online: {client.user}")
+    SENSITIVE_FIELDS = {
+        "github_token", "password", "token",
+        "access_token", "refresh_token", "session"
+    }
 
-@client.event
-async def on_message(message):
-    if message.author.bot:
-        return
+    def clean(doc):
+        doc["_id"] = str(doc.get("_id"))
 
-    if message.content.lower() == "!ping":
-        await message.channel.send("🏓 pong!")
+        for k in list(doc.keys()):
+            if k in SENSITIVE_FIELDS:
+                doc[k] = "HIDDEN"
 
-client.run(TOKEN)
+        return doc
+
+    data = {}
+
+    for name in collections:
+        col = db[name]
+        data[name] = [clean(d) for d in col.find().limit(50)]  # limit for safety
+
+    return jsonify({"ok": True, "data": data})
