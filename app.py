@@ -1,13 +1,10 @@
-from flask import Flask, jsonify, request
+import os
 from pymongo import MongoClient
 from datetime import datetime
-import os
-
-app = Flask(__name__)
+import json
 
 # 🔐 ENV
 MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 if not MONGO_URI:
     raise Exception("MONGO_URI not set")
@@ -15,11 +12,7 @@ if not MONGO_URI:
 client = MongoClient(MONGO_URI)
 db = client["blazecloud_panel"]
 
-users_col = db["users"]
-bots_col = db["bots"]
-services_col = db["services"]
-
-# ---------------- UTILS ----------------
+collections = ["users", "bots", "services"]
 
 SENSITIVE_FIELDS = {
     "github_token", "password", "token",
@@ -35,46 +28,24 @@ def clean(doc):
 
     return doc
 
-def now_iso():
-    return datetime.utcnow().isoformat()
+print("\n===== 🔥 DATABASE DUMP START =====\n")
 
-# ---------------- ROUTES ----------------
+for name in collections:
+    col = db[name]
+    print(f"\n📦 COLLECTION: {name.upper()}\n")
 
-@app.route("/")
-def home():
-    return jsonify({"ok": True, "message": "Backend running"})
+    docs = list(col.find().limit(20))  # limit for safety
 
-# 🔥 DEBUG DB ROUTE
-@app.route("/db")
-def debug_db():
-    # 🔐 protect route
-    if ADMIN_TOKEN:
-        if request.headers.get("x-admin-token") != ADMIN_TOKEN:
-            return jsonify({"ok": False, "error": "Unauthorized"}), 403
+    if not docs:
+        print("No data\n")
+        continue
 
-    data = {}
+    for d in docs:
+        print(json.dumps(clean(d), indent=2))
+        print("-" * 40)
 
-    for name in ["users", "bots", "services"]:
-        col = db[name]
-        data[name] = [clean(d) for d in col.find().limit(50)]
+print("\n===== ✅ DATABASE DUMP END =====\n")
 
-    return jsonify({
-        "ok": True,
-        "count": {
-            "users": users_col.count_documents({}),
-            "bots": bots_col.count_documents({}),
-            "services": services_col.count_documents({})
-        },
-        "data": data
-    })
-
-# ---------------- SIMPLE HEALTH ----------------
-
-@app.route("/health")
-def health():
-    return jsonify({"ok": True, "time": now_iso()})
-
-# ---------------- RUN ----------------
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+# keep app alive (important for Railway)
+while True:
+    pass
