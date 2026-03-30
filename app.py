@@ -8,16 +8,24 @@ import json
 import sqlite3
 import asyncio
 import io
-import os
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Suppress SSL warnings
 import urllib3
 urllib3.disable_warnings()
 
 # ==================== CONFIGURATION ====================
-TOKEN = os.getenv("TOKEN") # Replace with your bot token
+# Get token from environment variable or use hardcoded (for testing)
+TOKEN = os.getenv("TOKEN")  # Make sure your environment variable is named this
+if not TOKEN:
+    # Fallback to hardcoded for testing - REMOVE THIS IN PRODUCTION
+    TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your actual token if not using env
+
 PREFIX = "!"
 
 # Database setup
@@ -250,14 +258,15 @@ def check_account(email, password):
         session.close()
 
 # ==================== DISCORD BOT ====================
-bot = commands.Bot(command_prefix=PREFIX, intents=discord.Intents.all())
+# Remove default help command
+bot = commands.Bot(command_prefix=PREFIX, intents=discord.Intents.all(), help_command=None)
 
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     await bot.change_presence(activity=discord.Game(name=f"{PREFIX}help | Account Checker"))
 
-@bot.command(name="check", aliases=["c"], help="Check a single account: !check email:password")
+@bot.command(name="check", aliases=["c"])
 async def check_single(ctx, credentials: str = None):
     """Check a single Microsoft account"""
     if not credentials:
@@ -331,7 +340,7 @@ async def check_single(ctx, credentials: str = None):
     
     await msg.edit(content=None, embed=embed)
 
-@bot.command(name="masscheck", aliases=["mc"], help="Mass check accounts from a file")
+@bot.command(name="masscheck", aliases=["mc"])
 async def mass_check(ctx):
     """Mass check accounts from an uploaded file"""
     if not ctx.message.attachments:
@@ -438,7 +447,7 @@ async def mass_check(ctx):
     else:
         await ctx.send(embed=embed)
 
-@bot.command(name="stats", help="Show your check statistics")
+@bot.command(name="stats")
 async def stats(ctx):
     """Show user's check statistics"""
     c.execute("SELECT status, COUNT(*) FROM checks WHERE user_id = ? GROUP BY status", (ctx.author.id,))
@@ -473,9 +482,9 @@ async def stats(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name="help", aliases=["h"], help="Show this help message")
+@bot.command(name="commands", aliases=["help"])
 async def help_command(ctx):
-    """Show help menu"""
+    """Show help message"""
     embed = discord.Embed(
         title="🎮 MSMC Discord Bot - Minecraft Account Checker",
         description="Check Microsoft accounts for Minecraft ownership",
@@ -501,7 +510,7 @@ async def help_command(ctx):
     )
     
     embed.add_field(
-        name=f"{PREFIX}help",
+        name=f"{PREFIX}commands",
         value="Show this help message",
         inline=False
     )
@@ -516,12 +525,12 @@ async def help_command(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name="test", help="Test if bot is working")
+@bot.command(name="test")
 async def test(ctx):
-    """Simple test command"""
+    """Test if bot is working"""
     embed = discord.Embed(
         title="✅ Bot is Working!",
-        description=f"Use `{PREFIX}help` for available commands",
+        description=f"Use `{PREFIX}commands` for available commands",
         color=discord.Color.green()
     )
     await ctx.send(embed=embed)
@@ -532,14 +541,14 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         embed = discord.Embed(
             title="❌ Command Not Found",
-            description=f"Use `{PREFIX}help` for available commands",
+            description=f"Use `{PREFIX}commands` for available commands",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
     elif isinstance(error, commands.MissingRequiredArgument):
         embed = discord.Embed(
             title="❌ Missing Argument",
-            description=f"Use `{PREFIX}help` for correct usage",
+            description=f"Use `{PREFIX}commands` for correct usage",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -564,8 +573,8 @@ if __name__ == "__main__":
         print("2. Click 'New Application' and give it a name")
         print("3. Go to the 'Bot' section")
         print("4. Click 'Add Bot' and then 'Reset Token'")
-        print("5. Copy the token and paste it in the script")
-        print("\nReplace 'YOUR_BOT_TOKEN_HERE' with your actual token")
+        print("5. Copy the token and set it as environment variable DISCORD_BOT_TOKEN")
+        print("\nOr edit the TOKEN variable in the script")
         print("="*50)
         exit(1)
     
