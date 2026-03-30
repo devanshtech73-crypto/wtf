@@ -17,7 +17,7 @@ import urllib3
 urllib3.disable_warnings()
 
 # ==================== CONFIGURATION ====================
-TOKEN = os.getenv(TOKEN) # Replace with your bot token
+TOKEN = os.getenv("TOKEN") # Replace with your bot token
 PREFIX = "!"
 
 # Database setup
