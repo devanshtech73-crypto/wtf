@@ -4,6 +4,4 @@
 python-dotenv==1.0.1
 requests==2.31.0
 
-discord.py
-javascript 
-pysocks
+discord.py-self
