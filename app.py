@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-TOKEN = os.getenv('DTOKEN')
+TOKEN = os.getenv('DTOKEN', 'MTQ4MzA3OTQyNTkxMzUyNDQyNw.gAkc8jW6AxLXP3D3pk_cigyXXbk')
 MONITOR_CHANNEL_ID = int(os.getenv('MONITOR_CHANNEL_ID', '1470409209123176642'))
 FORWARD_CHANNEL_ID = int(os.getenv('FORWARD_CHANNEL_ID', '1483459286569849066'))
 
